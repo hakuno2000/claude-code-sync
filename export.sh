@@ -12,6 +12,7 @@ CLAUDE_DIR="${CLAUDE_DIR:-$HOME/.claude/projects}"
 TARGET_DIR="$(pwd)"
 SUBDIR="claude-logs"
 COMMIT_MSG=""
+NEW_NAME=""
 DO_PUSH=0
 
 # ---------- colors ----------
@@ -35,6 +36,7 @@ Options:
   -d, --dir DIR       Claude projects directory  (default: \$HOME/.claude/projects)
   -t, --target DIR    Target git repo or subdir  (default: current directory)
   -s, --subdir NAME   Folder inside repo for log (default: claude-logs)
+  -n, --name NAME     Rename the .jsonl before commit (skips prompt)
   -m, --message MSG   Commit message             (default: auto-generated)
   -p, --push          git push after commit
   -h, --help          Show this help
@@ -42,6 +44,7 @@ Options:
 Examples:
   $(basename "$0")                       # pick & commit in current repo
   $(basename "$0") -p                    # pick, commit, push
+  $(basename "$0") -n debug-session -p   # rename to debug-session.jsonl, push
   $(basename "$0") -t ~/notes -s logs -p
 EOF
 }
@@ -52,6 +55,7 @@ while [[ $# -gt 0 ]]; do
     -d|--dir)     CLAUDE_DIR="$2"; shift 2 ;;
     -t|--target)  TARGET_DIR="$2"; shift 2 ;;
     -s|--subdir)  SUBDIR="$2";     shift 2 ;;
+    -n|--name)    NEW_NAME="$2";   shift 2 ;;
     -m|--message) COMMIT_MSG="$2"; shift 2 ;;
     -p|--push)    DO_PUSH=1;       shift   ;;
     -h|--help)    usage; exit 0 ;;
@@ -150,7 +154,55 @@ mkdir -p "$DEST_DIR"
 
 # include project tag so files from different projects don't collide
 PROJECT_TAG=$(basename "$(dirname "$SELECTED")")
-DEST="$DEST_DIR/${PROJECT_TAG}__$(basename "$SELECTED")"
+DEFAULT_NAME="${PROJECT_TAG}__$(basename "$SELECTED")"
+
+# ---------- sanitize a user-supplied filename ----------
+# - trim surrounding whitespace
+# - reject path separators (no directory traversal allowed)
+# - strip control characters
+# - append .jsonl if missing
+# echoes sanitized name on success, returns non-zero on rejection
+sanitize_name() {
+  local n="$1"
+  # trim leading/trailing whitespace
+  n="${n#"${n%%[![:space:]]*}"}"
+  n="${n%"${n##*[![:space:]]}"}"
+  [[ -z "$n" ]] && return 1
+  # no path separators or parent refs
+  case "$n" in
+    */*|*\\*|..|.|*..*) return 2 ;;
+  esac
+  # strip control chars
+  n=$(printf '%s' "$n" | tr -d '\000-\037\177')
+  [[ -z "$n" ]] && return 1
+  # ensure .jsonl extension
+  [[ "$n" == *.jsonl ]] || n="${n}.jsonl"
+  printf '%s' "$n"
+}
+
+# ---------- prompt for rename if not given via -n ----------
+if [[ -z "$NEW_NAME" ]]; then
+  echo
+  printf 'Default filename: %s%s%s\n' "$DIM" "$DEFAULT_NAME" "$NC"
+  read -rp "Rename before commit? (blank = keep default): " NEW_NAME
+fi
+
+if [[ -n "$NEW_NAME" ]]; then
+  if FINAL_NAME=$(sanitize_name "$NEW_NAME"); then
+    ok "renamed to: $FINAL_NAME"
+  else
+    rc=$?
+    case "$rc" in
+      2) err "filename cannot contain path separators or '..'" ;;
+      *) err "invalid filename" ;;
+    esac
+    exit 1
+  fi
+else
+  FINAL_NAME="$DEFAULT_NAME"
+fi
+
+DEST="$DEST_DIR/$FINAL_NAME"
 
 cp "$SELECTED" "$DEST"
 ok "copied to $DEST"
